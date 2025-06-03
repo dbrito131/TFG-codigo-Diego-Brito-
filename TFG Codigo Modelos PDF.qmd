@@ -1,0 +1,289 @@
+---
+title: "TFG Codigo Modelos PDF"
+author: "Diego Brito"
+format: pdf
+editor: visual
+---
+
+## Librerias
+
+```{r,message=FALSE, results=FALSE}
+library(MASS) 
+library(glmnet) 
+library(rpart) 
+library(rpart.plot) 
+library(randomForest) 
+library(tidyverse) 
+library(readr) 
+library(psych) 
+library(ggplot2) 
+library(dplyr) 
+library(corrplot) 
+library(RColorBrewer) 
+library(gridExtra) 
+library(caret) 
+library(pROC) 
+library(car) 
+library(klaR)  
+# library(MXM) 
+# library(parallel) 
+# library(doParallel) 
+setwd("C:\\Users\\diego\\OneDrive\\Escritorio\\UCM\\Cuarto\\Segundo Cuatri\\TFG")
+```
+
+## Modelos
+
+Ya tenemos la base de datos depurada, por tanto vamos a llamarla, y seguimos trabajando aqui
+
+#### Base de datos depurada
+
+```{r}
+load("DatosDepurados.Rda") 
+datos$WALLSMATERIAL_MODE <- as.factor(datos$WALLSMATERIAL_MODE) 
+datos$FONDKAPREMONT_MODE <- as.factor(datos$FONDKAPREMONT_MODE) 
+datos$TARGET <- as.factor(datos$TARGET) 
+datos$TARGET <- factor(datos$TARGET, levels = c(0,1), labels = c("PAYER", "NOT_PAYER"))  
+table(datos$TARGET)/nrow(datos)
+```
+
+### Train / test
+
+```{r}
+set.seed(12345) 
+trainIndex <- createDataPartition(datos$TARGET, p=0.8, list=FALSE) 
+data_train <- datos[trainIndex,] 
+data_test <- datos[-trainIndex,]  
+data.frame(sort(colSums(is.na(data_train))))
+```
+
+### Forward
+
+#### AIC
+
+```{r}
+# null<-glm(TARGET~1,data=data_train,family=binomial)  
+# full<-glm(TARGET~.,data=data_train,family=binomial)  
+# AIC 
+#modeloForwAIC<-stats::step(null, scope=list(lower=null, upper=full), direction="forward",trace=F)  
+# una vez sabemos el modelo podemos escribirlo de esta forma  
+modeloForwAIC <- glm(TARGET~EXT_SOURCE_2+EXT_SOURCE_3+EXT_SOURCE_1+                       NAME_EDUCATION_TYPE+CODE_GENDER+FLAG_DOCUMENT_3+                       FLAG_OWN_CAR+REG_CITY_NOT_LIVE_CITY+DEF_30_CNT_SOCIAL_CIRCLE+                       DAYS_EMPLOYED+REGION_RATING_CLIENT_W_CITY+DAYS_LAST_PHONE_CHANGE+                       NAME_CONTRACT_TYPE+WALLSMATERIAL_MODE+AMT_REQ_CREDIT_BUREAU_QRT+                       FLAG_DOCUMENT_18+FLAG_DOCUMENT_16+OWN_CAR_AGE+AMT_ANNUITY+                       AMT_GOODS_PRICE+AMT_CREDIT+FLAG_WORK_PHONE+DAYS_REGISTRATION+                       NAME_INCOME_TYPE+FLAG_PHONE+FLOORSMAX_AVG+FONDKAPREMONT_MODE+                       DAYS_BIRTH+NAME_TYPE_SUITE+FLAG_DOCUMENT_2+FLAG_DOCUMENT_5+                       YEARS_EMPLOYED+REGION_RATING_CLIENT+REGION_POPULATION_RELATIVE+                       HOUR_APPR_PROCESS_START+WEEKDAY_APPR_PROCESS_START+                       
+    AMT_CREDIT_RANGE+NAME_HOUSING_TYPE, data = data_train, family = "binomial") 
+```
+
+#### BIC
+
+```{r}
+#modeloForwBIC<-stats::step(null, scope=list(lower=null, upper=full), direction="forward", k=log(nrow(data_train)),trace=F)  
+# de la misma forma hacemos lo mismo, esto se realiza porque cada vez que vamos a ejecutar lleva mucho tiempo. De esta forma ahorramos tiempo  
+modeloForwBIC <- glm(TARGET~EXT_SOURCE_2+EXT_SOURCE_3+EXT_SOURCE_1+NAME_EDUCATION_TYPE+                       CODE_GENDER+FLAG_DOCUMENT_3+FLAG_OWN_CAR+REG_CITY_NOT_LIVE_CITY+                       DEF_30_CNT_SOCIAL_CIRCLE+DAYS_EMPLOYED+                       
+                       REGION_RATING_CLIENT_W_CITY+
+                       DAYS_LAST_PHONE_CHANGE+                       NAME_CONTRACT_TYPE+AMT_REQ_CREDIT_BUREAU_QRT+FLAG_DOCUMENT_18+                       FLAG_DOCUMENT_16+OWN_CAR_AGE+AMT_ANNUITY+AMT_GOODS_PRICE+                       AMT_CREDIT+FLAG_WORK_PHONE+DAYS_REGISTRATION+NAME_INCOME_TYPE+                      
+            FLAG_PHONE+FLOORSMAX_AVG, data = data_train,family = "binomial")  
+```
+
+### Discriminante
+
+```{r}
+moddis <- lda(TARGET~., data=data_train)  
+moddis
+```
+
+Tenemos este problema
+
+```{r}
+# Assume your data is in `df` # Step 1: Expand factor variables like LDA would 
+X_expanded <- model.matrix(~ . - 1, data = data_train)  
+# Step 2: Identify constant or near-zero variance columns 
+nzv <- nearZeroVar(X_expanded, saveMetrics = TRUE)  
+# View constant or near-constant columns 
+constant_or_nzv <- nzv[nzv$zeroVar | nzv$nzv, ] 
+print(constant_or_nzv)
+```
+
+### otros
+
+```{r}
+(modelo_rf <- randomForest(TARGET ~ ., data = data_train, ntree = 100)) 
+# Call: 
+#  randomForest(formula = TARGET ~ ., data = data_train, ntree = 100)  
+#                Type of random forest: classification 
+#                      Number of trees: 100 
+# No. of variables tried at each split: 6 
+#  
+#         OOB estimate of  error rate: 8.66% 
+#Confusion matrix: #            PAYER NOT_PAYER class.error 
+# PAYER     183884       186 0.001010485 
+# NOT_PAYER  17266       194 0.988888889
+```
+
+```{r}
+modelos<-list(modeloForwBIC, modeloForwAIC)  
+sapply(modelos,function(x) formula(x))
+```
+
+## Analisis de modelos
+
+### Validacion cruzada
+
+```{r}
+data_train$TARGET <- relevel(data_train$TARGET, ref = "NOT_PAYER") 
+# evaluamos los modelos glm  
+modelos<-list(moddis, modeloForwBIC, modeloForwAIC)  
+metodos<-list("lda", "glm", "glm")  
+titulos<-list("LDA", "Forward BIC", "Forward AIC")    
+vcrTodosModelos<-list()  
+predClassCounts <- list()  
+for (i in 1:length(modelos)){    
+  set.seed(12345)    
+  vcr<-train(formula(modelos[[i]]), 
+             data = data_train,           
+             method = metodos[[i]], 
+             family="binomial",           
+             trControl = trainControl(method="repeatedcv", 
+                                      number=5, 
+                                      repeats=5,           
+                                      summaryFunction=twoClassSummary, 
+                                      classProbs=TRUE,           
+                                      savePredictions = TRUE)         
+             )   
+  vcrTodosModelos[[ titulos[[i]] ]] <- vcr   
+  # Predict class probabilities on test data   
+  probs <- predict(vcr, newdata = data_test, type = "prob")      
+  # Apply 0.5 threshold to NOT_PAYER probability   
+  pred_classes <- ifelse(probs$NOT_PAYER >= 0.5, "NOT_PAYER", "PAYER")      
+  # Count predicted classes   
+  class_counts <- table(Predicted = pred_classes)      
+  predClassCounts[[ titulos[[i]] ]] <- class_counts  
+}  
+
+bwplot(resamples(vcrTodosModelos), metric=c("ROC", "Sens", "Spec"), scales = list(x = list(relation = "free")))   
+
+summary(resamples(vcrTodosModelos), metric=c("ROC", "Sens", "Spec"))  
+```
+
+### Matrices de confusion
+
+```{r}
+# Get predicted probabilities 
+probs <- predict(vcrTodosModelos[["Forward BIC"]], data_train, type = "prob") 
+# Use ROC analysis to find best threshold 
+# roc_obj <- roc(data_train$TARGET, probs) 
+# best_thresh <- coords(roc_obj, "best", ret = "threshold", best.method = "youden") 
+#  
+# print(best_thresh)
+```
+
+#### Train
+
+```{r}
+probs <- predict(vcrTodosModelos[["Forward BIC"]], data_train, type = "prob") 
+
+cm2<-confusionMatrix(data=as.factor(ifelse(probs$NOT_PAYER>=0.08,"NOT_PAYER","PAYER")),  
+                     reference=data_train$TARGET, positive="NOT_PAYER")  
+
+cm2$table  
+cm2$overall[1:2]  
+cm2$byClass[1:2]
+```
+
+#### Test
+
+```{r}
+probs <- predict(vcrTodosModelos[["Forward BIC"]], data_test, type = "prob") 
+
+cm_test<-confusionMatrix(data=as.factor(ifelse(probs$NOT_PAYER>=0.08,"NOT_PAYER","PAYER")),  
+                     reference=data_test$TARGET, positive="NOT_PAYER")   
+
+cm_test$table 
+cm_test$overall[1:2] 
+cm_test$byClass[1:2]
+```
+
+### Curva ROC
+
+#### Train
+
+```{r}
+probs <- predict(modeloForwBIC, data_train, type = "response")  
+curvaROC<-roc(data_train$TARGET, probs)  
+curvaROC$auc 
+plot(curvaROC)
+```
+
+#### Test
+
+```{r}
+probs_test <- predict(modeloForwBIC, data_test, type = "response")  
+curvaROC_test<-roc(data_test$TARGET, probs_test)  
+curvaROC_test$auc    
+plot(curvaROC)  
+plot(curvaROC_test, add=T, col="red")
+```
+
+```{r}
+anova(modeloForwBIC)
+```
+
+```{r}
+summary(modeloForwBIC)
+```
+
+### Otros modelos AUC, Matrices
+
+Train
+
+```{r}
+probs <- predict(vcrTodosModelos[["LDA"]], data_train, type = "prob") 
+
+cm2<-confusionMatrix(data=as.factor(ifelse(probs$NOT_PAYER>=0.08,"NOT_PAYER","PAYER")),  
+                     reference=data_train$TARGET, positive="NOT_PAYER")  
+
+cm2$table  
+cm2$overall[1:2]  
+cm2$byClass[1:2]
+```
+
+Test
+
+```{r}
+probs <- predict(vcrTodosModelos[["LDA"]], data_test, type = "prob") 
+
+cm_test<-confusionMatrix(data=as.factor(ifelse(probs$NOT_PAYER>=0.08,"NOT_PAYER","PAYER")),  
+                     reference=data_test$TARGET, positive="NOT_PAYER") 
+
+cm_test$table 
+cm_test$overall[1:2] 
+cm_test$byClass[1:2]
+```
+
+Curva ROC
+
+Train
+
+```{r}
+probs <- predict(vcrTodosModelos[["LDA"]], data_train, type = "prob")
+str(probs)
+probs_pos <- probs[, "NOT_PAYER"]
+curvaROC <- roc(data_train$TARGET, probs_pos, levels = c("PAYER", "NOT_PAYER"))
+curvaROC$auc 
+plot(curvaROC)
+```
+
+Test
+
+```{r}
+probs <- predict(vcrTodosModelos[["LDA"]], data_test, type = "prob")
+str(probs)
+probs_pos <- probs[, "NOT_PAYER"]
+curvaROC_test <- roc(data_test$TARGET, probs_pos, levels = c("PAYER", "NOT_PAYER"))
+curvaROC$auc 
+plot(curvaROC)
+plot(curvaROC_test, add=T, col="red")
+```
+
+```{r}
+coeffs <- moddis$scaling
+importance <- abs(coeffs[,1])
+sorted_importance <- sort(importance, decreasing = TRUE)
+print(sorted_importance)
+```

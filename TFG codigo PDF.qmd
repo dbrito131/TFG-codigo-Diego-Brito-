@@ -1,0 +1,554 @@
+---
+title: "TFG Codigo"
+author: "Diego Brito"
+format: pdf
+editor: visual
+---
+
+## Librerias
+
+```{r,message=FALSE, results=FALSE}
+library(MASS)
+library(tidyverse)
+library(readr)
+library(psych)
+library(ggplot2)
+library(dplyr)
+library(corrplot)
+library(RColorBrewer)
+library(gridExtra)
+library(caret)
+library(pROC)
+library(car)
+
+# library(MXM)
+# library(parallel)
+# library(doParallel)
+
+```
+
+## Base de datos
+
+```{r,message=FALSE, results=FALSE}
+setwd("C:\\Users\\diego\\OneDrive\\Escritorio\\UCM\\Cuarto\\Segundo Cuatri")
+datos <- read.csv(file = "application_data.csv")
+```
+
+## Depuracion de datos
+
+primero vemos cuantas observaciones faltantes hay por columna
+
+```{r}
+data.frame(sort(colSums(is.na(datos))))
+
+```
+
+ahora tenemos que ver que hacemos con esas observaciones, hay 2 opciones, eliminar aquellas observaciones o sistituir los valores aplicando reglas sustitutivas
+
+```{r}
+
+# Calcular el porcentaje de valores nulos por columna
+null_datos_df <- datos |> 
+  summarise(across(everything(), ~ sum(is.na(.)) * 100 / n()))  |> # control + shift + m 
+  pivot_longer(cols = everything(), names_to = "Column_Name", values_to = "Null_Values_Percentage")
+
+# Crear el gráfico de puntos
+ggplot(null_datos_df, aes(x = reorder(Column_Name, -Null_Values_Percentage), y = Null_Values_Percentage)) +
+  geom_point(color = "blue") +
+  geom_hline(yintercept = 40, linetype = "dashed", color = "red") +  # Línea de referencia al 40%
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 7)) +
+  labs(title = "Percentage of Missing Values in Application Data",
+       x = "Columns",
+       y = "Null Values Percentage")
+```
+
+Variables con mas de un 40 % de datos faltantes
+
+```{r}
+# que columnas tienen mas del 40 % de sus datos missing o NA
+# Filtrar columnas con 40% o más de valores nulos
+# ponemos como limite un 40 % de datos faltantes, porque sistituir mas de un 40 - 50 % de datos faltantes 
+# con la mediana o media no es buena idea teniendo tanto % de datos faltantes 
+
+nullcol_40_application <- null_datos_df  |>  
+  filter(Null_Values_Percentage >= 40)
+
+# Mostrar el resultado
+print(nullcol_40_application)
+
+```
+
+### Datos faltantes
+
+cuantos datos faltantes tenemos por columna
+
+```{r}
+categorical_columns <- c('NAME_CONTRACT_TYPE', 'CODE_GENDER', 'NAME_TYPE_SUITE', 'NAME_INCOME_TYPE', 'NAME_EDUCATION_TYPE', 'NAME_FAMILY_STATUS', 'NAME_HOUSING_TYPE', 'OCCUPATION_TYPE', 'WEEKDAY_APPR_PROCESS_START','ORGANIZATION_TYPE', 'FLAG_OWN_CAR', 'FLAG_OWN_REALTY', 'LIVE_CITY_NOT_WORK_CITY', 'REG_CITY_NOT_LIVE_CITY', 'REG_CITY_NOT_WORK_CITY', 'REG_REGION_NOT_WORK_REGION','LIVE_REGION_NOT_WORK_REGION', 'REGION_RATING_CLIENT','REGION_RATING_CLIENT_W_CITY')
+
+contact_col <- c("FLAG_MOBIL", "FLAG_EMP_PHONE", "FLAG_WORK_PHONE", 
+                 "FLAG_CONT_MOBILE", "FLAG_PHONE", "FLAG_EMAIL")
+
+col_Doc <- c("FLAG_DOCUMENT_2", "FLAG_DOCUMENT_3", "FLAG_DOCUMENT_4", "FLAG_DOCUMENT_5", "FLAG_DOCUMENT_6",
+             "FLAG_DOCUMENT_7", "FLAG_DOCUMENT_8", "FLAG_DOCUMENT_9", "FLAG_DOCUMENT_10", "FLAG_DOCUMENT_11",
+             "FLAG_DOCUMENT_12", "FLAG_DOCUMENT_13", "FLAG_DOCUMENT_14", "FLAG_DOCUMENT_15", "FLAG_DOCUMENT_16",
+             "FLAG_DOCUMENT_17", "FLAG_DOCUMENT_18", "FLAG_DOCUMENT_19", "FLAG_DOCUMENT_20", "FLAG_DOCUMENT_21")
+
+ext <- c("EXT_SOURCE_1", "EXT_SOURCE_2", "EXT_SOURCE_3")
+data.frame(sort(colSums(is.na(datos))))
+```
+
+```{r}
+# Convertir las columnas a factor (categóricas)
+datos[categorical_columns] <- lapply(datos[categorical_columns], as.factor)
+
+```
+
+Factorizamos las variables contacto y otras que sean necesarias
+
+```{r}
+datos <- datos %>%
+  mutate(across(all_of(contact_col), as.factor)) %>%
+  mutate(across(all_of(col_Doc), as.factor))
+```
+
+#### variables categoricas
+
+con pocos datos faltantes (moda)
+
+```{r}
+# Función para imputar valores faltantes con la moda
+ imputar_moda <- function(x) {
+   if (is.factor(x) | is.character(x)) {  # Verifica si es categórica
+     moda <- names(sort(table(x), decreasing = TRUE))[1]  # Encuentra la moda
+     x[is.na(x)] <- moda  # Reemplaza los NA con la moda
+   }
+   return(x)
+ }
+```
+
+```{r}
+#categorical_columns <- c(categorical_columns,"AMT_INCOME_RANGE")
+# Aplicar la función a todas las columnas categóricas
+ datos[categorical_columns] <- lapply(datos[categorical_columns], imputar_moda)
+```
+
+#### variables numericas
+
+para sustituir aquellas variables que son numericas y tienen una observacion faltante, haremos uso de la media.
+
+```{r}
+distribucion_variables_numericas <- function(datos) {
+  numeric_columns <- datos |> select_if(is.numeric) |> names()  # Selecciona las variables numéricas
+  
+  for (col in numeric_columns) {
+    cat("\n-------------------------------------------------\n")
+    cat("Distribución de la variable:", col, "\n")
+    cat("-------------------------------------------------\n")
+    
+    print(summary(datos[[col]]))  # Resumen estadístico
+    hist(datos[[col]], main = paste("Histograma de", col), col = "skyblue", border = "white", xlab = col)
+    
+    # Test de Kolmogorov-Smirnov para normalidad
+    ks_test <- ks.test(datos[[col]], "pnorm", mean(datos[[col]], na.rm = TRUE), sd(datos[[col]], na.rm = TRUE))
+    
+    cat("\nTest de Kolmogorov-Smirnov para la normalidad:\n")
+    print(ks_test)
+    
+    if (ks_test$p.value < 0.05) {
+      cat("❌ La variable", col, "NO sigue una distribución normal (p <", ks_test$p.value, ")\n")
+    } else {
+      cat("✅ La variable", col, "SIGUE una distribución normal (p =", ks_test$p.value, ")\n")
+    }
+  }
+}
+
+# Llamada a la función
+distribucion_variables_numericas(datos)
+
+```
+
+```{r}
+ # Función para imputar valores faltantes con la media
+ imputar_mediana <- function(x) {
+   if (is.numeric(x)) {  # Verifica si es numérica
+     x[is.na(x)] <- median(x, na.rm = TRUE)  # Calcula y reemplaza con la media
+   }
+   return(x)
+ }
+```
+
+```{r}
+numeric_columns <- datos |> select_if(is.numeric) |> names()
+
+ # Aplicar la función a todas las columnas numéricas
+datos[numeric_columns] <- lapply(datos[numeric_columns], imputar_mediana)
+```
+
+```{r}
+data.frame(sort(colSums(is.na(datos))))
+```
+
+### Estandarizar valores
+
+Primero pasamos las columnas con dias negativos a positivos
+
+```{r}
+# Lista de columnas con días negativos
+date_col <- c("DAYS_BIRTH", "DAYS_EMPLOYED", "DAYS_REGISTRATION", "DAYS_ID_PUBLISH")
+
+# Convertir valores negativos a positivos en todas las columnas de la lista
+datos[date_col] <- abs(datos[date_col])
+```
+
+Ahora vamos a organizar a las personas segun su nivel de ingresos (Dicotomizamos)
+
+```{r}
+# Dividir AMT_INCOME_TOTAL por 100,000
+datos$AMT_INCOME_TOTAL <- datos$AMT_INCOME_TOTAL / 100000
+
+# Definir los límites de los bins
+bins <- c(0,1,2,3,4,5,6,7,8,9,10,11)
+
+# Definir las etiquetas para los rangos de ingresos
+slot <- c('0-100K','100K-200K', '200K-300K','300K-400K','400K-500K',
+          '500K-600K','600K-700K','700K-800K','800K-900K','900K-1M', '1M Above')
+
+# Crear la nueva variable categórica usando cut()
+datos$AMT_INCOME_RANGE <- cut(datos$AMT_INCOME_TOTAL, breaks = bins, labels = slot, include.lowest = TRUE)
+
+# Calcular la frecuencia relativa (%) de cada categoría en AMT_INCOME_RANGE
+prop.table(table(datos$AMT_INCOME_RANGE)) * 100
+```
+
+Relaizamos lo mismo para la cantida de credito, la edad y las horas trabajadas para facilitar las comparaciones en el futuro
+
+```{r}
+# Dividir AMT_CREDIT por 100,000
+datos$AMT_CREDIT <- datos$AMT_CREDIT / 100000
+
+# Definir los límites de los bins
+bins <- c(0,1,2,3,4,5,6,7,8,9,10,100)
+
+# Definir las etiquetas para los rangos de crédito
+slots <- c('0-100K','100K-200K', '200K-300K','300K-400K','400K-500K',
+           '500K-600K','600K-700K','700K-800K','800K-900K','900K-1M', '1M Above')
+
+# Crear la nueva variable categórica
+datos$AMT_CREDIT_RANGE <- cut(datos$AMT_CREDIT, breaks = bins, labels = slots, include.lowest = TRUE)
+
+# Calcular la frecuencia relativa (%) de cada categoría en AMT_CREDIT_RANGE
+prop.table(table(datos$AMT_CREDIT_RANGE)) * 100
+```
+
+```{r}
+# Crear la variable AGE a partir de DAYS_BIRTH
+datos$AGE <- floor(abs(datos$DAYS_BIRTH) / 365)
+
+# Definir los límites de los bins
+bins <- c(0, 20, 30, 40, 50, 100)
+
+# Definir las etiquetas para los grupos de edad
+slots <- c('0-20', '20-30', '30-40', '40-50', '50 above')
+
+# Crear la nueva variable categórica
+datos$AGE_GROUP <- cut(datos$AGE, breaks = bins, labels = slots, include.lowest = TRUE)
+
+# Calcular la frecuencia relativa (%) de cada categoría en AGE_GROUP
+prop.table(table(datos$AGE_GROUP)) * 100
+datos$AGE <- floor(abs(datos$DAYS_BIRTH) / 365)
+```
+
+```{r}
+# Crear la variable YEARS_EMPLOYED a partir de DAYS_EMPLOYED
+datos$YEARS_EMPLOYED <- floor(abs(datos$DAYS_EMPLOYED) / 365)
+
+# Definir los límites de los bins
+bins <- c(0, 5, 10, 20, 30, 40, 50, 60, 150)
+
+# Definir las etiquetas para los grupos de años de empleo
+slots <- c('0-5', '5-10', '10-20', '20-30', '30-40', '40-50', '50-60', '60 above')
+
+# Crear la nueva variable categórica
+datos$EMPLOYMENT_YEAR <- cut(datos$YEARS_EMPLOYED, breaks = bins, labels = slots, include.lowest = TRUE)
+
+# Calcular la frecuencia relativa (%) de cada categoría en EMPLOYMENT_YEAR
+prop.table(table(datos$EMPLOYMENT_YEAR)) * 100
+```
+
+Se lleva a cabo esto para poder facilitar la comparacion entre observaciones y la clasificacion de modelos. Viendo la diferencia entre los distintos grupos
+
+L1 PENALTY PARA LA REGRESION USAR apuntaría brevemente en cada caso, que puedes hacer para seguir
+
+### Factorial de variables
+
+Variables economicas
+
+```{r}
+economic_vars <- datos[, c("AMT_INCOME_TOTAL", "AMT_CREDIT", "AMT_ANNUITY", "AMT_GOODS_PRICE","OWN_CAR_AGE","DAYS_EMPLOYED")]
+#"CNT_FAM_MEMBERS" "CNT_CHILDREN"
+
+economic_vars_scaled <- scale(economic_vars)
+factor_analysis <- factanal(economic_vars_scaled, factors = 2, rotation = "varimax")
+
+print(factor_analysis, digits = 3, cutoff = 0.3, sort = TRUE)
+print(factor_analysis$loadings)
+print("------------------------- KMO -----------------------------------")
+KMO(economic_vars_scaled)  # Índice de adecuación muestral
+cortest.bartlett(economic_vars_scaled)  # Prueba de esfericidad de Bartlett
+print("------------------------ loadings ------------------------------------")
+loadings <- as.data.frame(factor_analysis$loadings[,1:2])
+loadings$Variable <- rownames(loadings)
+print("-------------------------- ggplot ----------------------------------")
+pca_result <- prcomp(economic_vars_scaled, scale = TRUE)
+screeplot(pca_result, type = "lines", main = "Scree Plot")
+
+
+ggplot(loadings, aes(x = Factor1, y = Factor2, label = Variable)) +
+  geom_point(color = "blue", size = 3) +  # Agrega puntos
+  geom_text(vjust = -0.5, hjust = 0.5, size = 3) +  # Reduce tamaño de texto
+  theme_minimal() +
+  ggtitle("Carga Factorial de Variables Económicas") +
+  xlab("Factor 1") +
+  ylab("Factor 2") +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12)
+  ) +
+  xlim(c(min(loadings$Factor1) - 0.1, max(loadings$Factor1) + 0.1)) +
+  ylim(c(min(loadings$Factor2) - 0.1, max(loadings$Factor2) + 0.1))
+
+
+```
+
+### Valores atipicos
+
+```{r}
+
+# Definir las variables para analizar outliers
+app_outlier_col_1 <- c('AMT_ANNUITY', 'AMT_INCOME_TOTAL', 'AMT_CREDIT', 'AMT_GOODS_PRICE', 'DAYS_EMPLOYED')
+app_outlier_col_2 <- c('CNT_CHILDREN', 'DAYS_BIRTH')
+
+# Crear boxplots para app_outlier_col_1
+plots1 <- lapply(app_outlier_col_1, function(var) {
+  ggplot(datos, aes(y = .data[[var]])) +
+    geom_boxplot(fill = "lightblue", color = "black") +
+    labs(title = var, y = "") +
+    theme_minimal()
+})
+
+# Crear boxplots para app_outlier_col_2
+plots2 <- lapply(app_outlier_col_2, function(var) {
+  ggplot(datos, aes(y = .data[[var]])) +
+    geom_boxplot(fill = "lightblue", color = "black") +
+    labs(title = var, y = "") +
+    theme_minimal()
+})
+
+# Mostrar todos los gráficos en una sola figura
+grid.arrange(grobs = c(plots1, plots2), ncol = 4)
+
+```
+
+```{r}
+# eliminamos la categoria unknown de NAME_FAMILY_STATUS al no tener ninguna observacion
+datos <- datos |> filter(NAME_FAMILY_STATUS != "Unknown")
+datos$NAME_FAMILY_STATUS <- droplevels(datos$NAME_FAMILY_STATUS)
+#eliminamos la categoria de "60 above" y "50-60" para YEARS_EMPLOYED
+datos <- datos[!datos$EMPLOYMENT_YEAR %in% c("50-60", "60 above"), ]
+# eliminamos la categoria XNA que tiene 0 observaciones
+datos <- datos[datos$CODE_GENDER != "XNA", ]
+datos$CODE_GENDER <- droplevels(datos$CODE_GENDER) 
+# hemos tenido problemas con las personas que estan desempleadas, hay que asignarlas un valor, por tanto las asignamos al valor "0-5"
+datos$EMPLOYMENT_YEAR <- ifelse(
+  datos$NAME_INCOME_TYPE == "Unemployed", "0", as.character(datos$EMPLOYMENT_YEAR))
+datos$EMPLOYMENT_YEAR <- as.factor(datos$EMPLOYMENT_YEAR)
+# aquellas observaciones que ya no se han podido sustituir ya sea por valores atipicos o causen problemas se eliminan 
+datos <- na.omit(datos)
+```
+
+### Tablas de contingencia
+
+```{r}
+tb_conting <- function(df, x, vec){
+  for(i in seq_along(vec)){
+    cat("\nTabla de Contingencia para:", vec[i], "\n")
+    
+    # Crear tabla de contingencia con nombres de filas y columnas
+    tab <- table(df[[x]], df[[vec[i]]])
+    dimnames(tab) <- list(TARGET = levels(factor(df[[x]])), Variable = levels(factor(df[[vec[i]]])))
+    
+    print(tab)
+    
+    cat("\nTest de Chi-Cuadrado:\n")
+    chi_test <- chisq.test(tab)
+    print(chi_test)
+    
+    cat("\n--------------------------\n")
+  }
+}
+
+
+# Llamada a la función, suponiendo que df es tu base de datos
+tb_conting(datos, "TARGET", contact_col)  # Puedes probar con col_Doc o ext también
+
+```
+
+```{r}
+tb_conting(datos, "TARGET", col_Doc)  # Puedes probar con col_Doc o ext también
+```
+
+## Analisis de Datos
+
+En un principio me interesa saber cuales son las variables mas importantes a la hora de predecir si alguien va a devovler el pago o no, por tanto realizamos un modelo con todas las variables y hacemos el ANOVA para ver cuales son las mas significativas
+
+```{r}
+#anova(lm(TARGET~.,data=datos))
+anova_results <- anova(lm(TARGET ~ ., data = datos))
+
+# Ordenar por la suma de cuadrados (Sum Sq) en orden descendente
+(anova_sorted <- anova_results[order(-anova_results$`Sum Sq`), ])
+```
+
+EXT_SOURCE_3 AMT_GOODS_PRICE FLAG_OWN_CAR EXT_SOURCE_1 CODE_GENDER DAYS_BIRTH NAME_EDUCATION_TYPE DAYS_EMPLOYED AMT_CREDIT NAME_INCOME_TYPE EXT_SOURCE_2 NAME_CONTRACT_TYPE OCCUPATION_TYPE NAME_FAMILY_STATUS AMT_CREDIT_RANGE
+
+```{r}
+# Contar la frecuencia de cada categoría en la variable TARGET
+Imbalance <- as.data.frame(table(datos$TARGET))
+colnames(Imbalance) <- c("Loan_Repayment_Status", "Count")
+
+# Reemplazar valores 0 y 1 con etiquetas significativas
+Imbalance$Loan_Repayment_Status <- factor(Imbalance$Loan_Repayment_Status, 
+                                          levels = c(0,1), 
+                                          labels = c("Repayer", "Defaulter"))
+
+# Calcular el porcentaje y crear la etiqueta
+Imbalance$Percent <- Imbalance$Count / sum(Imbalance$Count) * 100
+Imbalance$Label <- paste0(round(Imbalance$Percent, 1), "%")
+
+# Crear el gráfico de barras con etiquetas de porcentaje
+ggplot(Imbalance, aes(x = Loan_Repayment_Status, y = Count, fill = Loan_Repayment_Status)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = Label), vjust = -0.5) +  # Añadir etiquetas encima de las barras
+  scale_fill_manual(values = c("green", "red")) +
+  labs(title = "Imbalance Plotting", 
+       x = "Loan Repayment Status", 
+       y = "Count of Repayers & Defaulters") +
+  theme_minimal()
+```
+
+definimos una funcion que dado una variable nos de un histograma con los pagos devueltos y no devueltos segun la variable
+
+```{r}
+# Definir la función
+plot_loan_repayment <- function(df, variable) {
+  # Verificar que la variable existe
+  if (!(variable %in% colnames(df))) {
+    stop("La variable especificada no existe en el dataframe.")
+  }
+  
+  # Crear dataframe de trabajo
+  df_plot <- df[, c(variable, "TARGET")]
+  
+  # Convertir TARGET a factor con etiquetas
+  df_plot$TARGET <- factor(df_plot$TARGET, levels = c(0, 1), labels = c("Repayer", "Defaulter"))
+  
+  # Calcular proporciones por categoría
+  df_prop <- df_plot %>%
+    group_by(.data[[variable]], TARGET) %>%
+    summarise(n = n(), .groups = "drop") %>%
+    group_by(.data[[variable]]) %>%
+    mutate(pct = n / sum(n) * 100)
+  
+  # Graficar con porcentajes
+  ggplot(df_prop, aes_string(x = variable, y = "pct", fill = "TARGET")) +
+    geom_bar(stat = "identity", position = "dodge") +
+    labs(
+      title = paste("Distribución porcentual de", variable, "según estado de pago"),
+      x = variable, y = "Porcentaje (%)"
+    ) +
+    scale_fill_manual(values = c("green", "red")) +
+    scale_x_discrete(guide = guide_axis(angle = 45)) +
+    theme_minimal()
+}
+```
+
+### Graficar variables categoricas
+
+```{r}
+# Ejemplo de uso con la variable FLAG_OWN_CAR
+plot_loan_repayment(datos, "FLAG_OWN_CAR")
+plot_loan_repayment(datos, "CODE_GENDER")
+plot_loan_repayment(datos, "NAME_CONTRACT_TYPE")
+plot_loan_repayment(datos, "NAME_EDUCATION_TYPE")
+plot_loan_repayment(datos, "NAME_INCOME_TYPE")
+plot_loan_repayment(datos, "AMT_CREDIT_RANGE")
+```
+
+```{r}
+plot_loan_repayment(datos, "NAME_FAMILY_STATUS")
+plot_loan_repayment(datos, "ORGANIZATION_TYPE")
+plot_loan_repayment(datos, "OCCUPATION_TYPE")
+plot_loan_repayment(datos, "NAME_HOUSING_TYPE")
+plot_loan_repayment(datos, "EMPLOYMENT_YEAR")
+plot_loan_repayment(datos, "FLAG_DOCUMENT_3")
+plot_loan_repayment(datos, "NAME_TYPE_SUITE")
+```
+
+### Graficar variables continuas
+
+```{r}
+graficar_variable <- function(data, variable) {
+  # Calcular los porcentajes por clase
+  porcentajes <- data %>%
+    group_by(TARGET) %>%
+    summarise(n = n()) %>%
+    mutate(porc = paste0(round(100 * n / sum(n), 1), "%"))
+
+  # Crear etiquetas personalizadas
+  levels_target <- sort(unique(data$TARGET))
+  etiquetas <- paste0(
+    ifelse(levels_target == 0, "Repayers", "Defaulters"),
+    " (", porcentajes$porc, ")"
+  )
+
+  # Graficar con los porcentajes en la leyenda
+  ggplot(data, aes(x = .data[[variable]], color = as.factor(TARGET))) +
+    geom_density(size = 1) +
+    labs(x = variable, y = "Densidad", title = paste("Distribución de", variable, "según TARGET")) +
+    scale_color_manual(
+      values = c("blue", "red"),
+      labels = etiquetas,
+      name = "TARGET"
+    ) +
+    theme_minimal()
+}
+```
+
+```{r}
+# Ejemplo de uso con la variable "AMT_CREDIT"
+graficar_variable(datos, "AMT_CREDIT")
+```
+
+```{r}
+# Ejemplo de uso con la variable "AMT_CREDIT"
+graficar_variable(datos, "DAYS_BIRTH")
+graficar_variable(datos, "AMT_GOODS_PRICE")
+graficar_variable(datos, "DAYS_EMPLOYED")
+graficar_variable(datos, "DAYS_LAST_PHONE_CHANGE")
+graficar_variable(datos, "AMT_INCOME_TOTAL")
+graficar_variable(datos, "AGE")
+```
+
+## Guardar base de datos depurada para modelos
+
+primero eliminamos las variables menos significativas, y nos quedamos con las mas significativas
+
+```{r}
+variables_significativas <- c("EXT_SOURCE_3", "EXT_SOURCE_2", "DAYS_BIRTH", "AMT_GOODS_PRICE","FLAG_OWN_CAR", "EXT_SOURCE_1", "CODE_GENDER", "NAME_EDUCATION_TYPE", "DAYS_EMPLOYED", "REGION_RATING_CLIENT", "AMT_CREDIT", "NAME_INCOME_TYPE", "NAME_CONTRACT_TYPE", "AMT_CREDIT_RANGE","REGION_POPULATION_RELATIVE", "NAME_HOUSING_TYPE", "FLAG_WORK_PHONE","DEF_30_CNT_SOCIAL_CIRCLE", "REG_CITY_NOT_LIVE_CITY", "DAYS_REGISTRATION", "REGION_RATING_CLIENT_W_CITY", "FLAG_DOCUMENT_3", "AGE_GROUP", "EMPLOYMENT_YEAR", "FLAG_PHONE", "OWN_CAR_AGE", "CNT_CHILDREN",  "DAYS_LAST_PHONE_CHANGE", "FLAG_DOCUMENT_18", "NAME_TYPE_SUITE",  "FLAG_DOCUMENT_16", "WEEKDAY_APPR_PROCESS_START", "REG_CITY_NOT_WORK_CITY",  "AMT_ANNUITY", "WALLSMATERIAL_MODE", "AMT_INCOME_TOTAL",  "HOUR_APPR_PROCESS_START", "AMT_REQ_CREDIT_BUREAU_QRT", "APARTMENTS_AVG",  "FLOORSMAX_AVG", "FLAG_DOCUMENT_5", "FLAG_DOCUMENT_2", "FONDKAPREMONT_MODE", "OBS_30_CNT_SOCIAL_CIRCLE", "YEARS_EMPLOYED","TARGET")
+datos<- datos[,variables_significativas]
+# eliminamos los NA faltantes, estos se deben a valores atipicos que dan problemas 
+#guardamos en una base de datos los datos, asi podemos seguir con el TFG sin saturar el PC
+save(datos,file="DatosDepurados.RDa")
+```
